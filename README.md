@@ -5,9 +5,9 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A guarded, performance-focused Model Context Protocol server that lets an MCP client inspect, edit, test, and validate approved local development projects without exposing an unrestricted shell.
+A secure and performance-focused Model Context Protocol server that allows AI assistants to inspect, edit, test, and validate approved local software projects.
 
-It was built for practical Laravel, PHP, Vue, Vite, Node.js, TypeScript, and Chrome Extension workflows, with explicit project-root confinement and defensive checks around file writes and commands.
+LocalDev MCP can be used with different programming languages, frameworks, and project types. It restricts access to explicitly approved project folders and applies safety checks to file changes, Git operations, and command execution.
 
 ## Highlights
 
