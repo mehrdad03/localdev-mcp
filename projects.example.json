@@ -1,0 +1,12 @@
+{
+  "projects": {
+    "example-laravel-app": {
+      "root": "C:\\path\\to\\your-laravel-project",
+      "stack": ["laravel", "vue", "vite"]
+    },
+    "localdev-mcp": {
+      "root": "C:\\path\\to\\localdev-mcp",
+      "stack": ["node", "typescript", "mcp"]
+    }
+  }
+}

@@ -1,0 +1,15 @@
+node_modules/
+dist/
+logs/
+
+.env
+.env.*
+!.env.example
+
+projects.json
+projects.local.json
+
+*.log
+.DS_Store
+.idea/
+.vscode/
