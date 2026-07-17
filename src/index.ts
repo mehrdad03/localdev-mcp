@@ -22,6 +22,7 @@ import { audit } from "./lib/audit.js";
 import { readJsonCache, writeJsonCache } from "./lib/cache.js";
 import { runAllowedCommand, runGit } from "./lib/process.js";
 import { searchWithRipgrep } from "./lib/ripgrep.js";
+import { listInstalledSkills, loadSkill, loadSkillReference } from "./lib/skills.js";
 import { redactSecrets, sha256, textResult } from "./lib/text.js";
 import {
   defaultIgnoreGlobs,
@@ -30,13 +31,14 @@ import {
 } from "./security/path-guard.js";
 import { type AllowedExecutable, validateGitBranchName } from "./security/command-policy.js";
 
-const VERSION = "0.3.1";
+const VERSION = "0.4.0";
+const MAX_COMMAND_TIMEOUT_SECONDS = 60 * 60;
 
 const server = new McpServer(
   { name: "LocalDev MCP", version: VERSION },
   {
     instructions:
-      "Operate only inside configured projects. Prefer get_project_snapshot, batch_read_files, inspect_changed_files, replace_text, batch_apply_patches, and run_validation_plan to reduce tool round-trips without reducing safety. Read before writing, preserve SHA-256 checks, and prefer focused patches over full replacement. Never request secret files. Production flags, arbitrary shell commands, deployments, destructive Git operations, and database writes are blocked.",
+      "Operate only inside configured projects. Prefer get_project_snapshot, batch_read_files, inspect_changed_files, replace_text, batch_apply_patches, and run_validation_plan to reduce tool round-trips without reducing safety. For frontend design, redesign, UI implementation, responsive fixes, interface audits, or rendered visual QA, load the installed frontend-craft-director skill with get_skill before changing project files and follow it as the governing workflow. Read before writing, preserve SHA-256 checks, and prefer focused patches over full replacement. Never request secret files. Production flags, arbitrary shell commands, deployments, destructive Git operations, and database writes are blocked.",
   },
 );
 
@@ -50,6 +52,15 @@ const optionalCwdSchema = z
   .optional()
   .describe("Optional project-relative working directory. When omitted, the tool auto-detects the relevant app root.");
 const commandArgsSchema = z.array(z.string().max(500)).max(40).default([]);
+const skillNameSchema = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9-]{0,79}$/)
+  .describe("Installed skill name returned by list_skills.");
+const skillReferenceSchema = z
+  .string()
+  .min(1)
+  .max(240)
+  .describe("Supporting file returned by get_skill, such as references/visual-qa.md.");
 
 server.registerTool(
   "list_projects",
@@ -74,6 +85,68 @@ server.registerTool(
     );
     await audit("list_projects", { count: projects.length });
     return textResult({ projects });
+  },
+);
+
+server.registerTool(
+  "list_skills",
+  {
+    title: "List installed development skills",
+    description:
+      "Lists centrally installed LocalDev MCP skills with descriptions and their available references/templates. Use this when the user asks what workflows or skills are available.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  async () => {
+    const skills = await listInstalledSkills();
+    await audit("list_skills", { count: skills.length });
+    return textResult({ skills });
+  },
+);
+
+server.registerTool(
+  "get_skill",
+  {
+    title: "Load an installed development skill",
+    description:
+      "Loads the complete governing instructions for one centrally installed skill. For frontend design, redesign, UI implementation, responsive fixes, interface audits, or visual QA, call get_skill with 'frontend-craft-director' before inspecting or editing the target project.",
+    inputSchema: {
+      name: skillNameSchema,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  async ({ name }) => {
+    const skill = await loadSkill(name);
+    await audit("get_skill", {
+      name,
+      sha256: skill.sha256,
+      references: skill.references.length,
+      templates: skill.templates.length,
+    });
+    return textResult(skill);
+  },
+);
+
+server.registerTool(
+  "read_skill_reference",
+  {
+    title: "Read a skill reference or template",
+    description:
+      "Reads one supporting file declared by get_skill from that skill's references/ or templates/ directory. Use progressive disclosure: load the main skill first, then read only the supporting file needed for the current task.",
+    inputSchema: {
+      skill: skillNameSchema,
+      reference: skillReferenceSchema,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  async ({ skill, reference }) => {
+    const result = await loadSkillReference(skill, reference);
+    await audit("read_skill_reference", {
+      skill,
+      reference: result.reference,
+      sha256: result.sha256,
+    });
+    return textResult(result);
   },
 );
 
@@ -772,7 +845,7 @@ server.registerTool(
       executable: z.enum(["php", "composer", "npm", "git"]),
       args: commandArgsSchema,
       cwd: relativePathSchema,
-      timeoutSeconds: z.number().int().min(1).max(900).default(120),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(120),
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
@@ -794,7 +867,7 @@ server.registerTool(
       target: z.enum(["auto", "php", "npm"]).default("auto"),
       filter: z.string().max(300).optional(),
       compact: z.boolean().default(true),
-      timeoutSeconds: z.number().int().min(1).max(900).default(900),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(900),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
@@ -835,7 +908,7 @@ server.registerTool(
       command: z.string().min(1).max(100),
       args: commandArgsSchema,
       cwd: optionalCwdSchema,
-      timeoutSeconds: z.number().int().min(1).max(900).default(120),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(120),
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
@@ -857,7 +930,7 @@ server.registerTool(
       script: z.string().regex(/^[A-Za-z0-9:_-]+$/).max(100),
       args: commandArgsSchema,
       cwd: optionalCwdSchema,
-      timeoutSeconds: z.number().int().min(1).max(900).default(300),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(300),
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
@@ -886,7 +959,7 @@ server.registerTool(
       phpFilter: z.string().max(300).optional(),
       npmScripts: z.array(z.string().regex(/^[A-Za-z0-9:_-]+$/).max(100)).max(10).default([]),
       stopOnFailure: z.boolean().default(true),
-      timeoutSeconds: z.number().int().min(1).max(900).default(900),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(900),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
@@ -1220,7 +1293,7 @@ server.registerTool(
       path: z.string().max(200).optional(),
       name: z.string().max(200).optional(),
       json: z.boolean().default(false),
-      timeoutSeconds: z.number().int().min(1).max(300).default(120),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(120),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
@@ -1248,7 +1321,7 @@ server.registerTool(
       table: z.string().regex(/^[A-Za-z0-9_.-]+$/).max(128).optional(),
       counts: z.boolean().default(false),
       views: z.boolean().default(false),
-      timeoutSeconds: z.number().int().min(1).max(300).default(120),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(120),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
@@ -1274,7 +1347,7 @@ server.registerTool(
       filter: z.string().max(300).optional(),
       testsuite: z.string().max(200).optional(),
       path: z.string().max(500).optional(),
-      timeoutSeconds: z.number().int().min(1).max(900).default(900),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(900),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
@@ -1304,7 +1377,7 @@ server.registerTool(
       filter: z.string().max(300).optional(),
       path: z.string().max(500).optional(),
       compact: z.boolean().default(true),
-      timeoutSeconds: z.number().int().min(1).max(900).default(900),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(900),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
@@ -1333,7 +1406,7 @@ server.registerTool(
       cwd: optionalCwdSchema,
       script: z.string().regex(/^[A-Za-z0-9:_-]+$/).max(100).default("lint"),
       args: commandArgsSchema,
-      timeoutSeconds: z.number().int().min(1).max(900).default(300),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(300),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
@@ -1359,7 +1432,7 @@ server.registerTool(
       cwd: optionalCwdSchema,
       script: z.string().regex(/^[A-Za-z0-9:_-]+$/).max(100).default("build"),
       args: commandArgsSchema,
-      timeoutSeconds: z.number().int().min(1).max(900).default(600),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(600),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
@@ -1385,7 +1458,7 @@ server.registerTool(
       cwd: optionalCwdSchema,
       noDev: z.boolean().default(false),
       optimizeAutoloader: z.boolean().default(false),
-      timeoutSeconds: z.number().int().min(1).max(900).default(900),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(900),
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
@@ -1410,7 +1483,7 @@ server.registerTool(
       cwd: optionalCwdSchema,
       mode: z.enum(["ci", "install"]).default("ci"),
       ignoreScripts: z.boolean().default(false),
-      timeoutSeconds: z.number().int().min(1).max(900).default(900),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(900),
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
@@ -1432,7 +1505,7 @@ server.registerTool(
     inputSchema: {
       project: projectNameSchema,
       cwd: optionalCwdSchema,
-      timeoutSeconds: z.number().int().min(1).max(300).default(120),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(120),
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
@@ -1452,7 +1525,7 @@ server.registerTool(
     inputSchema: {
       project: projectNameSchema,
       cwd: optionalCwdSchema,
-      timeoutSeconds: z.number().int().min(1).max(300).default(120),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(120),
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },

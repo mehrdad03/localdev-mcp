@@ -9,7 +9,7 @@ const transport = new StdioClientTransport({
 
 const client = new Client({
   name: "localdev-mcp-smoke",
-  version: "0.3.1",
+  version: "0.4.0",
 });
 
 const expectedTools = [
@@ -23,6 +23,7 @@ const expectedTools = [
   "get_project_info",
   "get_project_snapshot",
   "get_project_tree",
+  "get_skill",
   "git_diff",
   "git_status",
   "git_switch_branch",
@@ -31,9 +32,11 @@ const expectedTools = [
   "inspect_routes",
   "list_directory",
   "list_projects",
+  "list_skills",
   "npm_install",
   "read_file",
   "read_laravel_logs",
+  "read_skill_reference",
   "rename_file",
   "replace_text",
   "restart_queue_workers",
@@ -60,7 +63,27 @@ try {
   if (missing.length > 0 || unexpected.length > 0) {
     throw new Error(`Tool registration mismatch. Missing: ${missing.join(", ") || "none"}; unexpected: ${unexpected.join(", ") || "none"}`);
   }
-  console.log(JSON.stringify({ count: names.length, tools: names, ok: true }, null, 2));
+
+  type ToolInputSchema = {
+    properties?: Record<string, { maximum?: unknown }>;
+  };
+  const timeoutTools = result.tools.flatMap((tool) => {
+    const schema = tool.inputSchema as ToolInputSchema;
+    const maximum = schema.properties?.timeoutSeconds?.maximum;
+    return maximum === undefined ? [] : [{ name: tool.name, maximum }];
+  });
+  const invalidTimeoutTools = timeoutTools.filter((tool) => tool.maximum !== 3600);
+  if (timeoutTools.length === 0 || invalidTimeoutTools.length > 0) {
+    throw new Error(`Command timeout schema mismatch: ${JSON.stringify(invalidTimeoutTools)}`);
+  }
+
+  console.log(JSON.stringify({
+    count: names.length,
+    tools: names,
+    timeoutMaximumSeconds: 3600,
+    timeoutToolCount: timeoutTools.length,
+    ok: true,
+  }, null, 2));
 } finally {
   await client.close();
 }

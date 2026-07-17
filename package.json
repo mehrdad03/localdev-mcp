@@ -1,6 +1,6 @@
 {
   "name": "localdev-mcp",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "A guarded, performance-focused local coding MCP server for ChatGPT Developer Mode.",
@@ -31,7 +31,6 @@
     "smoke": "node dist/smoke.js",
     "integration-smoke": "node dist/integration-smoke.js",
     "benchmark": "node dist/benchmark.js",
-    "export-portfolio": "node logs/export-github-portfolio.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {

@@ -11,7 +11,7 @@ It was built for practical Laravel, PHP, Vue, Vite, Node.js, TypeScript, and Chr
 
 ## Highlights
 
-- **36 focused MCP tools** for project discovery, code search, safe editing, Git inspection, tests, builds, Laravel diagnostics, and validation.
+- **39 focused MCP tools** for project discovery, centrally installed skills, code search, safe editing, Git inspection, tests, builds, Laravel diagnostics, and validation.
 - **Project allowlisting** through a local configuration file.
 - **SHA-256 concurrency protection** before modifying, replacing, renaming, or deleting existing files.
 - **Batch operations** for fast reads and multi-file patches with rollback attempts.
@@ -19,6 +19,9 @@ It was built for practical Laravel, PHP, Vue, Vite, Node.js, TypeScript, and Chr
 - **Command allowlists** instead of arbitrary shell access.
 - **Secret-aware path blocking and output redaction**.
 - **Cached project snapshots** and optional ripgrep acceleration.
+- **MCP-native skill registry** with progressive disclosure through `list_skills`, `get_skill`, and `read_skill_reference`.
+- **Bundled Frontend Craft Director** for design, redesign, implementation, responsive fixes, anti-AI-slop review, and rendered visual QA.
+- **Configurable command timeouts up to 3,600 seconds (one hour)** for long-running builds, tests, installs, and validation workflows.
 
 ## Architecture
 
@@ -29,6 +32,7 @@ MCP Client
 LocalDev MCP (stdio)
    |
    +-- Project configuration allowlist
+   +-- Central MCP-native skill registry
    +-- Path and secret guards
    +-- SHA-256 write protection
    +-- Command policy allowlists
@@ -39,6 +43,10 @@ Approved local repositories only
 ```
 
 ## Tool groups
+
+### Skills
+
+`list_skills`, `get_skill`, `read_skill_reference`
 
 ### Project discovery and reading
 
@@ -59,6 +67,39 @@ Approved local repositories only
 ### Frontend and Node.js
 
 `run_npm`, `run_eslint`, `run_build`, `npm_install`
+
+## MCP-native skills
+
+Skills live under `skills/<skill-name>/` and are available to every configured project without copying them into application repositories.
+
+The bundled skill is:
+
+```text
+frontend-craft-director
+```
+
+Recommended frontend invocation:
+
+```text
+@LocalDev
+
+Project: <project-key>
+
+Use the frontend-craft-director skill as the mandatory workflow for this frontend task.
+Load the skill before editing files, inspect the real repository, produce a Design Read,
+preserve routes/APIs/behavior, do not install packages without approval, run repository
+validation, and report rendered visual-QA evidence honestly.
+```
+
+The MCP client should call:
+
+```text
+list_skills
+get_skill(name: "frontend-craft-director")
+read_skill_reference(skill: "frontend-craft-director", reference: "references/visual-qa.md")
+```
+
+`get_skill` returns the complete self-contained skill. `read_skill_reference` provides focused supporting references and the `templates/DESIGN.md` contract when progressive disclosure is preferable.
 
 ## Requirements
 
@@ -168,12 +209,13 @@ LocalDev MCP is intentionally not a general terminal, deployment agent, browser 
 ## Example workflow
 
 ```text
-1. get_project_snapshot
-2. search_code / batch_read_files
-3. apply_patch / batch_apply_patches
-4. run_tests / run_validation_plan
-5. inspect_changed_files
-6. git_switch_branch when a clean branch transition is required
+1. get_skill when a governing workflow applies
+2. get_project_snapshot
+3. search_code / batch_read_files
+4. apply_patch / batch_apply_patches
+5. run_tests / run_validation_plan
+6. inspect_changed_files
+7. git_switch_branch when a clean branch transition is required
 ```
 
 ## License

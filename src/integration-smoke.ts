@@ -13,7 +13,7 @@ const transport = new StdioClientTransport({
 
 const client = new Client({
   name: "localdev-mcp-integration-smoke",
-  version: "0.3.1",
+  version: "0.4.0",
 });
 
 type TextContentItem = {
@@ -62,6 +62,24 @@ try {
   const configuredProjects = Array.isArray(projects.projects)
     ? projects.projects as Array<Record<string, unknown>>
     : [];
+  const skills = await call("list_skills");
+  const installedSkills = Array.isArray(skills.skills)
+    ? skills.skills as Array<Record<string, unknown>>
+    : [];
+  if (!installedSkills.some((skill) => skill.name === "frontend-craft-director")) {
+    throw new Error("frontend-craft-director is not listed by list_skills.");
+  }
+  const frontendSkill = await call("get_skill", { name: "frontend-craft-director" });
+  if (!String(frontendSkill.content ?? "").includes("Mandatory usage rule")) {
+    throw new Error("get_skill did not return the frontend skill content.");
+  }
+  const visualQaReference = await call("read_skill_reference", {
+    skill: "frontend-craft-director",
+    reference: "references/visual-qa.md",
+  });
+  if (!String(visualQaReference.content ?? "").includes("Evidence levels")) {
+    throw new Error("read_skill_reference did not return the visual QA reference.");
+  }
   const projectInfo = await call("get_project_info", { project: "localdev-mcp" });
   const snapshot = await call("get_project_snapshot", { project: "localdev-mcp", forceRefresh: true });
   const safeBranch = "feature/integration-branch-policy";
@@ -193,6 +211,9 @@ try {
     ok: true,
     checks: [
       "list_projects",
+      "list_skills",
+      "get_skill",
+      "read_skill_reference",
       "get_project_info",
       "get_project_snapshot",
       "guarded_git_branch_policy",
