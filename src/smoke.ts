@@ -9,7 +9,7 @@ const transport = new StdioClientTransport({
 
 const client = new Client({
   name: "localdev-mcp-smoke",
-  version: "0.4.0",
+  version: "0.5.0",
 });
 
 const expectedTools = [
@@ -29,10 +29,17 @@ const expectedTools = [
   "git_switch_branch",
   "inspect_changed_files",
   "inspect_database_schema",
+  "inspect_local_process",
   "inspect_routes",
+  "laravel_database_assert",
+  "laravel_database_snapshot",
+  "laravel_run_artisan",
+  "laravel_tinker_execute",
   "list_directory",
   "list_projects",
   "list_skills",
+  "local_http_request",
+  "local_secret_operation",
   "npm_install",
   "read_file",
   "read_laravel_logs",
@@ -51,8 +58,28 @@ const expectedTools = [
   "run_validation_plan",
   "search_code",
   "search_files",
+  "start_local_process",
+  "stop_local_process",
   "write_file",
 ].sort();
+
+const oneHourTools = new Set([
+  "composer_install",
+  "laravel_database_assert",
+  "laravel_database_snapshot",
+  "laravel_run_artisan",
+  "laravel_tinker_execute",
+  "npm_install",
+  "run_artisan",
+  "run_build",
+  "run_command",
+  "run_eslint",
+  "run_npm",
+  "run_pest",
+  "run_phpunit",
+  "run_tests",
+  "run_validation_plan",
+]);
 
 try {
   await client.connect(transport);
@@ -72,9 +99,12 @@ try {
     const maximum = schema.properties?.timeoutSeconds?.maximum;
     return maximum === undefined ? [] : [{ name: tool.name, maximum }];
   });
-  const invalidTimeoutTools = timeoutTools.filter((tool) => tool.maximum !== 3600);
-  if (timeoutTools.length === 0 || invalidTimeoutTools.length > 0) {
-    throw new Error(`Command timeout schema mismatch: ${JSON.stringify(invalidTimeoutTools)}`);
+  const unsafeTimeoutTools = timeoutTools.filter((tool) => typeof tool.maximum !== "number" || tool.maximum > 3600);
+  const missingOneHourMaximum = timeoutTools.filter(
+    (tool) => oneHourTools.has(tool.name) && tool.maximum !== 3600,
+  );
+  if (unsafeTimeoutTools.length > 0 || missingOneHourMaximum.length > 0) {
+    throw new Error(`Command timeout schema mismatch: ${JSON.stringify({ unsafeTimeoutTools, missingOneHourMaximum })}`);
   }
 
   console.log(JSON.stringify({
@@ -82,6 +112,7 @@ try {
     tools: names,
     timeoutMaximumSeconds: 3600,
     timeoutToolCount: timeoutTools.length,
+    oneHourToolCount: oneHourTools.size,
     ok: true,
   }, null, 2));
 } finally {

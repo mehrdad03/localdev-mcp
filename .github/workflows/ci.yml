@@ -34,3 +34,9 @@ jobs:
 
       - name: Smoke test
         run: npm run smoke
+
+      - name: Integration smoke test
+        run: npm run integration-smoke
+
+      - name: Laravel tools smoke test
+        run: npm run laravel-tools-smoke

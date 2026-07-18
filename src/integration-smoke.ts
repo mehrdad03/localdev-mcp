@@ -1,19 +1,36 @@
-import { rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { createPatch } from "diff";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { validateCommand, validateGitBranchName } from "./security/command-policy.js";
 
+const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "localdev-mcp-integration-smoke-"));
+const projectsFile = path.join(temporaryRoot, "projects.json");
+const projectRoot = path.resolve(".");
+await writeFile(projectsFile, JSON.stringify({
+  projects: {
+    "localdev-mcp": {
+      root: projectRoot,
+      stack: ["node", "typescript", "mcp"],
+    },
+  },
+}, null, 2), "utf8");
+
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: ["dist/index.js"],
+  env: {
+    ...process.env,
+    LOCALDEV_MCP_PROJECTS: projectsFile,
+  },
   stderr: "pipe",
 });
 
 const client = new Client({
   name: "localdev-mcp-integration-smoke",
-  version: "0.4.0",
+  version: "0.5.0",
 });
 
 type TextContentItem = {
@@ -210,6 +227,7 @@ try {
   console.log(JSON.stringify({
     ok: true,
     checks: [
+      "self_contained_project_config",
       "list_projects",
       "list_skills",
       "get_skill",
@@ -240,5 +258,6 @@ try {
   await Promise.allSettled([
     rm(path.resolve("logs/integration-smoke-a.txt"), { force: true }),
     rm(path.resolve("logs/integration-smoke-b.txt"), { force: true }),
+    rm(temporaryRoot, { recursive: true, force: true }),
   ]);
 }

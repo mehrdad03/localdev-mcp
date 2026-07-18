@@ -2,7 +2,10 @@
   "projects": {
     "example-laravel-app": {
       "root": "C:\\path\\to\\your-laravel-project",
-      "stack": ["laravel", "vue", "vite"]
+      "stack": ["laravel", "vue", "vite"],
+      "phpExecutable": "C:\\path\\to\\php.exe",
+      "allowedSecretEnvKeys": ["WEBHOOK_APP_SECRET"],
+      "readOnlyArtisanCommands": ["integration:readiness"]
     },
     "localdev-mcp": {
       "root": "C:\\path\\to\\localdev-mcp",

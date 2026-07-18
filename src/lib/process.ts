@@ -12,6 +12,7 @@ export interface ProcessOutput {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  outputLimitExceeded?: boolean;
   durationMs: number;
 }
 
@@ -19,6 +20,17 @@ export interface AllowedCommandResult extends ProcessOutput {
   project: string;
   command: string[];
   cwd: string;
+}
+
+export interface DirectProcessOptions {
+  command: string;
+  args?: string[];
+  cwd: string;
+  timeoutSeconds?: number;
+  useShell?: boolean;
+  env?: NodeJS.ProcessEnv;
+  stdin?: string;
+  maxOutputChars?: number;
 }
 
 export async function runAllowedCommand(options: {
@@ -51,8 +63,11 @@ export async function runAllowedCommand(options: {
   }
 
   const command = windowsExecutableName(executable);
-  const startedAt = Date.now();
-  const output = await spawnProcess(command, args, absolutePath, timeoutSeconds, {
+  const output = await runDirectProcess({
+    command,
+    args,
+    cwd: absolutePath,
+    timeoutSeconds,
     useShell: process.platform === "win32" && (executable === "npm" || executable === "composer"),
   });
 
@@ -60,7 +75,6 @@ export async function runAllowedCommand(options: {
     project,
     command: [executable, ...args],
     cwd: relativePath,
-    durationMs: Date.now() - startedAt,
     ...output,
   };
 }
@@ -70,29 +84,55 @@ export async function runGit(
   args: string[],
   timeoutSeconds = 120,
 ): Promise<ProcessOutput> {
-  const startedAt = Date.now();
-  const output = await spawnProcess("git", args, cwd, timeoutSeconds, { useShell: false });
-  return { ...output, durationMs: Date.now() - startedAt };
+  return runDirectProcess({
+    command: "git",
+    args,
+    cwd,
+    timeoutSeconds,
+    useShell: false,
+  });
 }
 
-async function spawnProcess(
-  command: string,
-  args: string[],
-  cwd: string,
-  timeoutSeconds: number,
-  options: { useShell: boolean },
-): Promise<Omit<ProcessOutput, "durationMs">> {
-  return await new Promise((resolve, reject) => {
+export async function runDirectProcess(options: DirectProcessOptions): Promise<ProcessOutput> {
+  const {
+    command,
+    args = [],
+    cwd,
+    timeoutSeconds = 120,
+    useShell = false,
+    env = {},
+    stdin,
+    maxOutputChars = 60_000,
+  } = options;
+  const startedAt = Date.now();
+
+  const output = await new Promise<Omit<ProcessOutput, "durationMs">>((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      shell: options.useShell,
+      shell: useShell,
       windowsHide: true,
-      env: { ...process.env, CI: "1", NO_COLOR: "1", FORCE_COLOR: "0" },
+      env: {
+        ...process.env,
+        CI: "1",
+        NO_COLOR: "1",
+        FORCE_COLOR: "0",
+        ...env,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
     });
 
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let outputLimitExceeded = false;
+    let settled = false;
+
+    const stopForLimit = () => {
+      if (stdout.length + stderr.length <= maxOutputChars || outputLimitExceeded) return;
+      outputLimitExceeded = true;
+      child.kill();
+    };
+
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill();
@@ -100,22 +140,37 @@ async function spawnProcess(
 
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
+      stopForLimit();
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
+      stopForLimit();
     });
     child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       reject(error);
     });
     child.on("close", (exitCode) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       resolve({
         exitCode,
-        stdout: truncate(stdout),
-        stderr: truncate(stderr),
+        stdout: truncate(stdout, maxOutputChars),
+        stderr: truncate(stderr, maxOutputChars),
         timedOut,
+        outputLimitExceeded,
       });
     });
+
+    if (stdin !== undefined) child.stdin.end(stdin);
+    else child.stdin.end();
   });
+
+  return {
+    ...output,
+    durationMs: Date.now() - startedAt,
+  };
 }

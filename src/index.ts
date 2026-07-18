@@ -11,15 +11,28 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
-import { fileURLToPath } from "node:url";
 import { applyPatch } from "diff";
 import fg from "fast-glob";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { appRoot, getProject, loadConfig } from "./config.js";
+import { appRoot, getProject, loadConfig, projectsFile } from "./config.js";
 import { audit } from "./lib/audit.js";
 import { readJsonCache, writeJsonCache } from "./lib/cache.js";
+import { parseJsonDocument } from "./lib/json.js";
+import {
+  executeLaravelTinker,
+  laravelDatabaseAssert,
+  laravelDatabaseSnapshot,
+  localHttpRequest,
+  localSecretOperation,
+  runLaravelProcess,
+} from "./lib/laravel-integration.js";
+import {
+  inspectLocalProcess,
+  startLaravelServer,
+  stopLocalProcess,
+} from "./lib/local-processes.js";
 import { runAllowedCommand, runGit } from "./lib/process.js";
 import { searchWithRipgrep } from "./lib/ripgrep.js";
 import { listInstalledSkills, loadSkill, loadSkillReference } from "./lib/skills.js";
@@ -30,15 +43,19 @@ import {
   assertNoSymlinkEscape,
 } from "./security/path-guard.js";
 import { type AllowedExecutable, validateGitBranchName } from "./security/command-policy.js";
+import {
+  assertArtisanExecutionAllowed,
+  buildArtisanArguments,
+} from "./security/laravel-policy.js";
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 const MAX_COMMAND_TIMEOUT_SECONDS = 60 * 60;
 
 const server = new McpServer(
   { name: "LocalDev MCP", version: VERSION },
   {
     instructions:
-      "Operate only inside configured projects. Prefer get_project_snapshot, batch_read_files, inspect_changed_files, replace_text, batch_apply_patches, and run_validation_plan to reduce tool round-trips without reducing safety. For frontend design, redesign, UI implementation, responsive fixes, interface audits, or rendered visual QA, load the installed frontend-craft-director skill with get_skill before changing project files and follow it as the governing workflow. Read before writing, preserve SHA-256 checks, and prefer focused patches over full replacement. Never request secret files. Production flags, arbitrary shell commands, deployments, destructive Git operations, and database writes are blocked.",
+      "Operate only inside configured projects. Prefer get_project_snapshot, batch_read_files, inspect_changed_files, replace_text, batch_apply_patches, and run_validation_plan to reduce tool round-trips without reducing safety. For frontend design, redesign, UI implementation, responsive fixes, interface audits, or rendered visual QA, load the installed frontend-craft-director skill with get_skill before changing project files and follow it as the governing workflow. For Laravel integration work, use the dedicated laravel_run_artisan, laravel_tinker_execute, local_secret_operation, local_http_request, database, and managed-process tools instead of trying to bypass the generic command policy. Read before writing, preserve SHA-256 checks, and prefer focused patches over full replacement. Never request secret files. Production flags, arbitrary shell commands, deployments, destructive Git operations, and unapproved database writes are blocked.",
   },
 );
 
@@ -61,6 +78,18 @@ const skillReferenceSchema = z
   .min(1)
   .max(240)
   .describe("Supporting file returned by get_skill, such as references/visual-qa.md.");
+const artisanOptionValueSchema = z.union([z.string().max(1000), z.number(), z.boolean(), z.null()]);
+const databaseScalarSchema = z.union([z.string().max(20_000), z.number(), z.boolean(), z.null()]);
+const databaseQuerySchema = z.object({
+  table: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/),
+  columns: z.array(z.string().regex(/^(?:\*|[A-Za-z_][A-Za-z0-9_]{0,127})$/)).max(50).optional(),
+  where: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/), databaseScalarSchema).optional(),
+  limit: z.number().int().min(1).max(200).default(20),
+  orderBy: z.object({
+    column: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/),
+    direction: z.enum(["asc", "desc"]).default("asc"),
+  }).optional(),
+});
 
 server.registerTool(
   "list_projects",
@@ -921,6 +950,315 @@ server.registerTool(
 );
 
 server.registerTool(
+  "laravel_run_artisan",
+  {
+    title: "Run a risk-classified Laravel Artisan command",
+    description: "Runs built-in or project-specific Artisan commands through a risk classifier. Unknown custom commands require explicit write approval unless listed as read-only in the project configuration.",
+    inputSchema: {
+      project: projectNameSchema,
+      cwd: optionalCwdSchema,
+      command: z.string().min(1).max(100),
+      arguments: z.array(z.string().max(1000)).max(40).default([]),
+      options: z.record(z.string().max(82), artisanOptionValueSchema).default({}),
+      confirmWrite: z.boolean().default(false),
+      outputMode: z.enum(["full", "summary", "json"]).default("full"),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(120),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  },
+  async ({ project, cwd, command, arguments: positional, options, confirmWrite, outputMode, timeoutSeconds }) => {
+    const resolvedCwd = await requireMarkerCwd(project, "artisan", cwd, "Laravel artisan");
+    const projectConfig = await getProject(project);
+    const risk = assertArtisanExecutionAllowed({
+      command,
+      project: projectConfig,
+      confirmWrite,
+    });
+    const args = buildArtisanArguments(command, positional, options);
+    const result = await runLaravelProcess({ project, cwd: resolvedCwd, args, timeoutSeconds });
+    await audit("laravel_run_artisan", {
+      project,
+      cwd: resolvedCwd,
+      command,
+      risk,
+      success: result.exitCode === 0 && !result.timedOut && !result.outputLimitExceeded,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+    });
+    assertSuccessfulProcess(command, result);
+
+    if (outputMode === "summary") {
+      return textResult({ risk, ...summarizeProcessResult(command, result) });
+    }
+    if (outputMode === "json") {
+      const parsed = parseJsonDocument(result.stdout);
+      return textResult({ risk, parsed, exitCode: result.exitCode, durationMs: result.durationMs });
+    }
+    return textResult({ risk, ...result });
+  },
+);
+
+server.registerTool(
+  "laravel_tinker_execute",
+  {
+    title: "Execute guarded multiline Laravel Tinker code",
+    description: "Runs reviewed PHP code through Laravel Tinker using an ephemeral script outside the repository. Process, filesystem, network, raw-SQL, and secret access are blocked; database writes require explicit approval.",
+    inputSchema: {
+      project: projectNameSchema,
+      cwd: optionalCwdSchema,
+      code: z.string().min(1).max(100_000),
+      transactionMode: z.enum(["none", "rollback", "commit"]).default("none"),
+      outputMode: z.enum(["full", "sanitized", "json"]).default("sanitized"),
+      allowDatabaseWrite: z.boolean().default(false),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(300),
+      maxOutputChars: z.number().int().min(1000).max(1_000_000).default(120_000),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  },
+  async ({ project, cwd, code, transactionMode, outputMode, allowDatabaseWrite, timeoutSeconds, maxOutputChars }) => {
+    const resolvedCwd = await requireMarkerCwd(project, "artisan", cwd, "Laravel artisan");
+    const result = await executeLaravelTinker({
+      project,
+      cwd: resolvedCwd,
+      code,
+      transactionMode,
+      outputMode,
+      allowDatabaseWrite,
+      timeoutSeconds,
+      maxOutputChars,
+    });
+    await audit("laravel_tinker_execute", {
+      project,
+      cwd: resolvedCwd,
+      codeSha256: result.codeSha256,
+      transactionMode,
+      databaseWriteRequested: allowDatabaseWrite,
+      databaseWriteDetected: result.databaseWriteDetected,
+      success: result.exitCode === 0 && !result.timedOut,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+    });
+    return textResult(result);
+  },
+);
+
+server.registerTool(
+  "local_secret_operation",
+  {
+    title: "Use an approved local environment secret in memory",
+    description: "Checks an approved Laravel .env key or computes a digest/HMAC without returning, logging, placing on the command line, or writing the secret value.",
+    inputSchema: {
+      project: projectNameSchema,
+      cwd: optionalCwdSchema,
+      envKey: z.string().regex(/^[A-Z][A-Z0-9_]{1,127}$/),
+      operation: z.enum(["hmac_sha256", "hmac_sha1", "sha256", "presence_check"]),
+      payload: z.string().max(1_000_000).optional(),
+      outputEncoding: z.enum(["hex", "hex_with_algorithm_prefix"]).default("hex"),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  async ({ project, cwd, envKey, operation, payload, outputEncoding }) => {
+    const resolvedCwd = await requireMarkerCwd(project, "artisan", cwd, "Laravel artisan");
+    const result = await localSecretOperation({
+      project,
+      cwd: resolvedCwd,
+      envKey,
+      operation,
+      payload,
+      outputEncoding,
+    });
+    await audit("local_secret_operation", {
+      project,
+      cwd: resolvedCwd,
+      envKey,
+      operation,
+      payloadSha256: payload === undefined ? null : sha256(payload),
+      success: true,
+    });
+    return textResult(result);
+  },
+);
+
+server.registerTool(
+  "local_http_request",
+  {
+    title: "Send a loopback-only HTTP integration request",
+    description: "Sends an HTTP request only to approved hosts that resolve exclusively to loopback addresses. Redirects are revalidated and sensitive headers are redacted.",
+    inputSchema: {
+      project: projectNameSchema,
+      method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]).default("GET"),
+      url: z.string().url().max(2000),
+      headers: z.record(z.string().max(200), z.string().max(20_000)).default({}),
+      body: z.string().max(1_000_000).optional(),
+      timeoutSeconds: z.number().int().min(1).max(300).default(30),
+      followRedirects: z.boolean().default(false),
+      expectedStatuses: z.array(z.number().int().min(100).max(599)).max(20).default([]),
+      redactHeaders: z.array(z.string().min(1).max(200)).max(50).default([]),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  },
+  async ({ project, method, url, headers, body, timeoutSeconds, followRedirects, expectedStatuses, redactHeaders }) => {
+    const result = await localHttpRequest({
+      project,
+      method,
+      url,
+      headers,
+      body,
+      timeoutSeconds,
+      followRedirects,
+      expectedStatuses,
+      redactHeaders,
+    });
+    const auditUrl = new URL(url);
+    await audit("local_http_request", {
+      project,
+      method,
+      target: `${auditUrl.origin}${auditUrl.pathname}`,
+      success: result.assertionPassed,
+      status: result.status,
+      durationMs: result.durationMs,
+    });
+    return textResult(result);
+  },
+);
+
+server.registerTool(
+  "start_local_process",
+  {
+    title: "Start a managed local Laravel process",
+    description: "Starts only a LocalDev-managed Laravel development server on a loopback host. Port 0 selects an available ephemeral port automatically; occupied explicit ports are refused, and unrelated processes are never adopted or stopped.",
+    inputSchema: {
+      project: projectNameSchema,
+      cwd: optionalCwdSchema,
+      kind: z.literal("laravel_server").default("laravel_server"),
+      host: z.enum(["127.0.0.1", "localhost", "::1"]).default("127.0.0.1"),
+      port: z.number().int().min(0).max(65535).default(0),
+      readinessTimeoutSeconds: z.number().int().min(1).max(60).default(15),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  },
+  async ({ project, cwd, host, port, readinessTimeoutSeconds }) => {
+    const resolvedCwd = await requireMarkerCwd(project, "artisan", cwd, "Laravel artisan");
+    const result = await startLaravelServer({ project, cwd: resolvedCwd, host, port, readinessTimeoutSeconds });
+    await audit("start_local_process", {
+      project,
+      cwd: resolvedCwd,
+      kind: "laravel_server",
+      host,
+      port,
+      sessionId: result.sessionId,
+      success: result.running,
+    });
+    return textResult(result);
+  },
+);
+
+server.registerTool(
+  "inspect_local_process",
+  {
+    title: "Inspect a LocalDev-managed process",
+    description: "Returns status and sanitized output for a process previously started by this MCP server instance.",
+    inputSchema: {
+      project: projectNameSchema,
+      sessionId: z.string().regex(/^local-[0-9a-f-]{36}$/),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  async ({ project, sessionId }) => {
+    const result = inspectLocalProcess({ project, sessionId });
+    await audit("inspect_local_process", { project, sessionId, running: result.running });
+    return textResult(result);
+  },
+);
+
+server.registerTool(
+  "stop_local_process",
+  {
+    title: "Stop a LocalDev-managed process",
+    description: "Stops only a process session created by start_local_process for the same project.",
+    inputSchema: {
+      project: projectNameSchema,
+      sessionId: z.string().regex(/^local-[0-9a-f-]{36}$/),
+      timeoutSeconds: z.number().int().min(1).max(60).default(10),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ project, sessionId, timeoutSeconds }) => {
+    const result = await stopLocalProcess({ project, sessionId, timeoutSeconds });
+    await audit("stop_local_process", { project, sessionId, success: result.running === false, exitCode: result.exitCode });
+    return textResult(result);
+  },
+);
+
+server.registerTool(
+  "laravel_database_snapshot",
+  {
+    title: "Read a structured Laravel database snapshot",
+    description: "Reads a count and bounded rows through Laravel's query builder. Table, columns, filters, ordering, and limit are structured; model-provided raw SQL is not accepted.",
+    inputSchema: {
+      project: projectNameSchema,
+      cwd: optionalCwdSchema,
+      query: databaseQuerySchema,
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(120),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  async ({ project, cwd, query, timeoutSeconds }) => {
+    const resolvedCwd = await requireMarkerCwd(project, "artisan", cwd, "Laravel artisan");
+    const result = await laravelDatabaseSnapshot({ project, cwd: resolvedCwd, query, timeoutSeconds });
+    await audit("laravel_database_snapshot", {
+      project,
+      cwd: resolvedCwd,
+      table: query.table,
+      count: result.count,
+      returnedRows: result.rows.length,
+      success: true,
+    });
+    return textResult(result);
+  },
+);
+
+server.registerTool(
+  "laravel_database_assert",
+  {
+    title: "Run a structured Laravel database assertion",
+    description: "Evaluates count, existence, column, or JSON-path assertions over a bounded read-only Laravel query without accepting raw SQL.",
+    inputSchema: {
+      project: projectNameSchema,
+      cwd: optionalCwdSchema,
+      query: databaseQuerySchema,
+      assertion: z.enum(["count_equals", "exists", "not_exists", "column_equals", "json_path_equals"]),
+      expected: z.unknown().optional(),
+      column: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/).optional(),
+      jsonPath: z.string().regex(/^[A-Za-z0-9_.-]{1,240}$/).optional(),
+      timeoutSeconds: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_SECONDS).default(120),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  async ({ project, cwd, query, assertion, expected, column, jsonPath, timeoutSeconds }) => {
+    const resolvedCwd = await requireMarkerCwd(project, "artisan", cwd, "Laravel artisan");
+    const result = await laravelDatabaseAssert({
+      project,
+      cwd: resolvedCwd,
+      query,
+      assertion,
+      expected,
+      column,
+      jsonPath,
+      timeoutSeconds,
+    });
+    await audit("laravel_database_assert", {
+      project,
+      cwd: resolvedCwd,
+      table: query.table,
+      assertion,
+      passed: result.passed,
+    });
+    return textResult(result);
+  },
+);
+
+server.registerTool(
   "run_npm",
   {
     title: "Run an npm package script",
@@ -1735,6 +2073,24 @@ function parseNameStatus(output: string): Array<{ status: string; path: string; 
     });
 }
 
+function assertSuccessfulProcess(
+  name: string,
+  result: {
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+    timedOut: boolean;
+    outputLimitExceeded?: boolean;
+  },
+): void {
+  if (result.timedOut) throw new Error(`${name} timed out.`);
+  if (result.outputLimitExceeded) throw new Error(`${name} exceeded the configured output limit.`);
+  if (result.exitCode === 0) return;
+
+  const detail = compactOutput(redactSecrets(result.stderr || result.stdout), 4000, 30);
+  throw new Error(`${name} failed with exit code ${result.exitCode ?? "unknown"}${detail ? `: ${detail}` : "."}`);
+}
+
 function summarizeProcessResult(
   name: string,
   result: {
@@ -1742,6 +2098,7 @@ function summarizeProcessResult(
     stdout: string;
     stderr: string;
     timedOut: boolean;
+    outputLimitExceeded?: boolean;
     durationMs: number;
   },
 ): Record<string, unknown> {
@@ -1750,8 +2107,9 @@ function summarizeProcessResult(
   return {
     name,
     exitCode: result.exitCode,
-    passed: result.exitCode === 0 && !result.timedOut,
+    passed: result.exitCode === 0 && !result.timedOut && !result.outputLimitExceeded,
     timedOut: result.timedOut,
+    outputLimitExceeded: result.outputLimitExceeded ?? false,
     durationMs: result.durationMs,
     stdout: compactOutput(stdout),
     stderr: compactOutput(stderr),
@@ -1769,6 +2127,4 @@ function compactOutput(output: string, maxChars = 4000, maxLines = 30): string {
 const transport = new StdioServerTransport();
 await server.connect(transport);
 
-console.error(
-  `LocalDev MCP ${VERSION} started. Config: ${fileURLToPath(new URL("../projects.json", import.meta.url))}`,
-);
+console.error(`LocalDev MCP ${VERSION} started. Config: ${projectsFile}`);
