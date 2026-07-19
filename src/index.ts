@@ -19,6 +19,7 @@ import { z } from "zod";
 import { appRoot, getProject, loadConfig, projectsFile } from "./config.js";
 import { audit } from "./lib/audit.js";
 import { readJsonCache, writeJsonCache } from "./lib/cache.js";
+import { importFileToProject } from "./lib/file-import.js";
 import { parseJsonDocument } from "./lib/json.js";
 import {
   executeLaravelTinker,
@@ -33,6 +34,7 @@ import {
   startLaravelServer,
   stopLocalProcess,
 } from "./lib/local-processes.js";
+import { installFileInputSchemaAdvertising } from "./lib/mcp-file-schema.js";
 import { runAllowedCommand, runGit } from "./lib/process.js";
 import { searchWithRipgrep } from "./lib/ripgrep.js";
 import { listInstalledSkills, loadSkill, loadSkillReference } from "./lib/skills.js";
@@ -48,16 +50,20 @@ import {
   buildArtisanArguments,
 } from "./security/laravel-policy.js";
 
-const VERSION = "0.5.0";
+const VERSION = "0.6.0";
 const MAX_COMMAND_TIMEOUT_SECONDS = 60 * 60;
 
 const server = new McpServer(
   { name: "LocalDev MCP", version: VERSION },
   {
     instructions:
-      "Operate only inside configured projects. Prefer get_project_snapshot, batch_read_files, inspect_changed_files, replace_text, batch_apply_patches, and run_validation_plan to reduce tool round-trips without reducing safety. For frontend design, redesign, UI implementation, responsive fixes, interface audits, or rendered visual QA, load the installed frontend-craft-director skill with get_skill before changing project files and follow it as the governing workflow. For Laravel integration work, use the dedicated laravel_run_artisan, laravel_tinker_execute, local_secret_operation, local_http_request, database, and managed-process tools instead of trying to bypass the generic command policy. Read before writing, preserve SHA-256 checks, and prefer focused patches over full replacement. Never request secret files. Production flags, arbitrary shell commands, deployments, destructive Git operations, and unapproved database writes are blocked.",
+      "Operate only inside configured projects. Prefer get_project_snapshot, batch_read_files, inspect_changed_files, replace_text, batch_apply_patches, and run_validation_plan to reduce tool round-trips without reducing safety. Use import_file_to_project for uploaded binary assets instead of Base64 or text writes. For frontend design, redesign, UI implementation, responsive fixes, interface audits, or rendered visual QA, load the installed frontend-craft-director skill with get_skill before changing project files and follow it as the governing workflow. For Laravel integration work, use the dedicated laravel_run_artisan, laravel_tinker_execute, local_secret_operation, local_http_request, database, and managed-process tools instead of trying to bypass the generic command policy. Read before writing, preserve SHA-256 checks, and prefer focused patches over full replacement. Never request secret files. Production flags, arbitrary shell commands, deployments, destructive Git operations, and unapproved database writes are blocked.",
   },
 );
+
+installFileInputSchemaAdvertising(server, {
+  import_file_to_project: ["source_file"],
+});
 
 const projectNameSchema = z.string().min(1).describe("Project key from list_projects.");
 const relativePathSchema = z
@@ -176,6 +182,48 @@ server.registerTool(
       sha256: result.sha256,
     });
     return textResult(result);
+  },
+);
+
+server.registerTool(
+  "import_file_to_project",
+  {
+    title: "Import an uploaded file into an allowlisted project",
+    description:
+      "Copies a real uploaded file into a project without Base64 conversion. The source must come from an approved mounted-file root, and the destination is restricted to the selected project root.",
+    inputSchema: {
+      project: projectNameSchema,
+      source_file: z.string().min(1).describe("Mounted upload path supplied by ChatGPT as a file input."),
+      destination: z.string().min(1).describe("Project-relative destination path. Absolute paths and parent traversal are rejected."),
+      overwrite: z.boolean().default(false),
+      createParents: z.boolean().default(true),
+      expectedSha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  },
+  async ({ project, source_file, destination, overwrite, createParents, expectedSha256 }) => {
+    const result = await importFileToProject({
+      project,
+      sourceFile: source_file,
+      destination,
+      overwrite,
+      createParents,
+      expectedSha256,
+    });
+    await audit("import_file_to_project", {
+      project,
+      destination: result.path,
+      size: result.size,
+      mimeType: result.mimeType,
+      sha256: result.sha256,
+      overwritten: result.overwritten,
+    });
+    return textResult({
+      path: result.path,
+      size: result.size,
+      mimeType: result.mimeType,
+      sha256: result.sha256,
+    });
   },
 );
 
@@ -930,8 +978,8 @@ server.registerTool(
 server.registerTool(
   "run_artisan",
   {
-    title: "Run an allowlisted Artisan command",
-    description: "Runs a safe Artisan command from an auto-detected or specified Laravel app root.",
+    title: "Run an allowlisted or configured read-only Artisan command",
+    description: "Runs a built-in allowlisted Artisan command or a project-specific command explicitly configured as read-only. Use laravel_run_artisan for reviewed write-capable custom commands.",
     inputSchema: {
       project: projectNameSchema,
       command: z.string().min(1).max(100),
@@ -943,6 +991,27 @@ server.registerTool(
   },
   async ({ project, command, args, cwd, timeoutSeconds }) => {
     const resolvedCwd = await requireMarkerCwd(project, "artisan", cwd, "Laravel artisan");
+    const projectConfig = await getProject(project);
+
+    if (projectConfig.readOnlyArtisanCommands.includes(command)) {
+      if (args.some((arg) => /^--(?:force|env)(?:=|$)/i.test(arg))) {
+        throw new Error("Production, environment-selection, and force flags are blocked.");
+      }
+      const commandArgs = buildArtisanArguments(command, args, {});
+      const result = await runLaravelProcess({ project, cwd: resolvedCwd, args: commandArgs, timeoutSeconds });
+      await audit("run_artisan", {
+        project,
+        cwd: resolvedCwd,
+        command,
+        risk: "READ_ONLY",
+        success: result.exitCode === 0 && !result.timedOut && !result.outputLimitExceeded,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+      });
+      assertSuccessfulProcess(command, result);
+      return textResult({ risk: "READ_ONLY", ...result });
+    }
+
     const result = await runAllowedCommand({ project, executable: "php", args: ["artisan", command, ...args], cwd: resolvedCwd, timeoutSeconds });
     await audit("run_artisan", commandAuditData(result));
     return textResult(result);

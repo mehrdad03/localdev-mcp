@@ -4,6 +4,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { parseJsonDocument } from "./lib/json.js";
+import { validateCommand } from "./security/command-policy.js";
 
 const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "localdev-mcp-laravel-smoke-"));
 const fakeProjectRoot = path.join(temporaryRoot, "fake-laravel");
@@ -39,6 +40,26 @@ try {
   const { getProject } = await import("./config.js");
 
   const project = await getProject("fake-laravel");
+
+  let genericTinkerHinted = false;
+  try {
+    validateCommand("php", ["artisan", "tinker", "--execute=return 1;"]);
+  } catch (error) {
+    genericTinkerHinted = String(error).includes("laravel_tinker_execute");
+  }
+  if (!genericTinkerHinted) {
+    throw new Error("Generic Tinker blocking did not direct callers to laravel_tinker_execute.");
+  }
+
+  let arbitraryPhpHinted = false;
+  try {
+    validateCommand("php", ["-r", "echo 1;"]);
+  } catch (error) {
+    arbitraryPhpHinted = String(error).includes("php -r remains disabled");
+  }
+  if (!arbitraryPhpHinted) {
+    throw new Error("Arbitrary PHP blocking did not preserve php -r protection with a dedicated-tool hint.");
+  }
 
   const parsedJson = parseJsonDocument("NOTICE: local framework banner\n{\"status\":\"DRY_RUN_READY\",\"nested\":{\"ok\":true}}\nDONE");
   if (!isRecord(parsedJson) || parsedJson.status !== "DRY_RUN_READY") {
@@ -207,6 +228,8 @@ try {
   console.log(JSON.stringify({
     ok: true,
     checks: [
+      "generic_tinker_blocked_with_dedicated_tool_hint",
+      "arbitrary_php_r_blocked_with_dedicated_tool_hint",
       "noisy_json_command_output",
       "custom_artisan_read_only",
       "dangerous_artisan_blocked",

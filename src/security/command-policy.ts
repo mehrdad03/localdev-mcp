@@ -92,13 +92,19 @@ export function validateCommand(
     if (first === "artisan") {
       const command = args[1] ?? "";
       if (!allowedArtisanCommands.has(command)) {
-        throw new Error(`Artisan command '${command}' is not allowed.`);
+        throw new Error(
+          `Artisan command '${command}' is not allowed through the generic PHP command tool. ` +
+          "Use laravel_run_artisan for reviewed project-specific commands or laravel_tinker_execute for guarded Laravel callbacks.",
+        );
       }
       return;
     }
     if (first === "vendor/bin/pest" || first === "vendor/bin/phpunit") return;
     if (first === "-v" || first === "--version") return;
-    throw new Error("PHP may run only allowlisted Artisan commands, Pest, or PHPUnit.");
+    throw new Error(
+      "Arbitrary PHP execution is blocked. Use laravel_run_artisan, laravel_tinker_execute, " +
+      "local_secret_operation, or local_http_request instead; php -r remains disabled.",
+    );
   }
 
   if (executable === "composer") {

@@ -6,7 +6,8 @@ LocalDev MCP exposes a deliberately narrow local-development surface to an MCP c
 
 - Only project roots explicitly listed in the selected `projects.local.json`, `projects.json`, or `LOCALDEV_MCP_PROJECTS` configuration are accessible.
 - File access is project-relative and rejects parent-directory traversal, absolute target paths, symlink escapes, secret-like files, dependency directories, Git internals, and common private-key formats.
-- Existing-file writes require SHA-256 version checks. Replace, patch, rename, and delete operations keep local backups.
+- Existing-file writes require SHA-256 version checks. Replace, patch, rename, delete, and binary overwrite operations keep local backups.
+- `import_file_to_project` accepts mounted files only from approved import roots, rejects secret-like source names and symlinks, confines destinations to the selected project root, streams bytes without Base64 conversion, and verifies the final SHA-256 digest.
 - Generic commands use executable and argument allowlists. Shell operators, arbitrary executables, deployment commands, production flags, and destructive Git operations are not exposed.
 - Custom Artisan commands are risk-classified. Unknown commands require explicit write approval unless the project configuration marks them as read-only. Irreversible and external-side-effect Artisan commands are blocked; dedicated MCP tools must be used where available.
 - Multiline Tinker code is executed through an ephemeral script outside the repository and the script is removed in `finally`.
@@ -23,6 +24,7 @@ LocalDev MCP exposes a deliberately narrow local-development surface to an MCP c
 - Run LocalDev MCP only on a trusted development machine.
 - Keep the project allowlist narrow.
 - Use a private `projects.local.json` for machine-specific paths and approved secret-key names.
+- Set `LOCALDEV_MCP_IMPORT_ROOTS` to the narrow tunnel upload-mount directory when it is outside the operating-system temp directory.
 - Configure only commands you have reviewed as `readOnlyArtisanCommands`.
 - Keep production credentials and production databases outside projects used for local integration tests.
 - Review explicit database-write and irreversible-operation confirmations before execution.

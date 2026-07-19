@@ -40,3 +40,6 @@ jobs:
 
       - name: Laravel tools smoke test
         run: npm run laravel-tools-smoke
+
+      - name: File import smoke test
+        run: npm run file-import-smoke

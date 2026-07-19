@@ -9,7 +9,7 @@ const transport = new StdioClientTransport({
 
 const client = new Client({
   name: "localdev-mcp-smoke",
-  version: "0.5.0",
+  version: "0.6.0",
 });
 
 const expectedTools = [
@@ -31,6 +31,7 @@ const expectedTools = [
   "inspect_database_schema",
   "inspect_local_process",
   "inspect_routes",
+  "import_file_to_project",
   "laravel_database_assert",
   "laravel_database_snapshot",
   "laravel_run_artisan",

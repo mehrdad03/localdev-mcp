@@ -11,9 +11,10 @@ LocalDev MCP is designed for practical coding workflows without exposing a gener
 
 ## Highlights
 
-- **48 focused MCP tools** for project discovery, centrally installed skills, code search, safe editing, Git inspection, tests, builds, Laravel diagnostics, integration testing, and validation.
+- **49 focused MCP tools** for project discovery, centrally installed skills, code search, safe editing, binary file import, Git inspection, tests, builds, Laravel diagnostics, integration testing, and validation.
 - **Project allowlisting** through a local configuration file.
-- **SHA-256 concurrency protection** before modifying, replacing, renaming, or deleting existing files.
+- **SHA-256 concurrency protection** before modifying, replacing, renaming, deleting, or overwriting existing files.
+- **Direct binary file import** from mounted MCP file inputs without Base64 conversion, with source-root allowlisting and MIME/hash verification.
 - **Batch operations** for fast reads and multi-file patches with rollback attempts.
 - **Guarded Git branch switching** with clean-tree checks, branch-name validation, expected-HEAD verification, and dry-run support.
 - **Risk-classified custom Artisan commands** instead of unrestricted shell execution.
@@ -37,8 +38,8 @@ LocalDev MCP (stdio)
    |
    +-- Project configuration allowlist
    +-- Central MCP-native skill registry
-   +-- Path and secret guards
-   +-- SHA-256 write protection
+   +-- Path, upload-source, and secret guards
+   +-- SHA-256 write and binary-import protection
    +-- Command and Laravel risk policies
    +-- Loopback HTTP enforcement
    +-- Managed-process ownership
@@ -58,9 +59,9 @@ Approved local repositories only
 
 `list_projects`, `get_project_info`, `get_project_snapshot`, `get_project_tree`, `list_directory`, `read_file`, `batch_read_files`, `search_files`, `search_code`
 
-### Safe file editing
+### Safe file editing and import
 
-`write_file`, `create_file`, `replace_text`, `apply_patch`, `batch_apply_patches`, `rename_file`, `delete_file`
+`import_file_to_project`, `write_file`, `create_file`, `replace_text`, `apply_patch`, `batch_apply_patches`, `rename_file`, `delete_file`
 
 ### Git and validation
 
@@ -78,6 +79,35 @@ Approved local repositories only
 
 `run_npm`, `run_eslint`, `run_build`, `npm_install`
 
+## Binary file import
+
+`import_file_to_project` accepts a real MCP file input in `source_file` and copies the mounted file directly into an allowlisted project. Binary data is streamed as bytes; it is never converted to Base64 or passed through text encoding.
+
+Inputs:
+
+- `project`: configured project key.
+- `source_file`: uploaded file input advertised to the MCP client with schema `type: "file"`.
+- `destination`: project-relative destination. Absolute paths, `..` traversal, secret-like destinations, and symlink escapes are rejected.
+- `overwrite`: defaults to `false`. Existing files are refused unless explicitly enabled.
+- `createParents`: defaults to `true`.
+- `expectedSha256`: optional concurrency check for the existing destination when overwriting.
+
+The result contains `path`, `size`, `mimeType`, and `sha256`. PNG, JPEG, WEBP, SVG, PDF, and common additional formats are detected from file signatures when available, with extension fallback for unknown data.
+
+Uploaded source paths must be inside an approved mount root. By default, LocalDev MCP accepts files under the operating system temporary directory. Set one or more explicit roots when the tunnel mounts uploads elsewhere:
+
+```text
+LOCALDEV_MCP_IMPORT_ROOTS=C:\path\to\tunnel\uploads
+```
+
+On Windows, separate multiple roots with `;`; on macOS or Linux, use `:`. The default maximum import size is 100 MiB. It can be changed up to 1 GiB:
+
+```text
+LOCALDEV_MCP_MAX_IMPORT_BYTES=209715200
+```
+
+Secret-like source names such as `.env`, private-key formats, and credential files are rejected. Overwrites create a local binary backup before replacement and verify the final destination hash.
+
 ## Laravel integration workflow
 
 ### Custom Artisan commands
@@ -90,6 +120,8 @@ Approved local repositories only
 - `EXTERNAL_SIDE_EFFECT`
 
 Unknown project-specific commands are not assumed to be harmless. Add known read-only commands to `readOnlyArtisanCommands`; otherwise explicit approval is required for reversible local writes. Irreversible database commands and long-running or external-side-effect Artisan commands are blocked; dedicated MCP process tools must be used where available. Production flags such as `--force` and `--env` remain blocked.
+
+Both `run_artisan` and `laravel_run_artisan` accept project-specific commands explicitly configured as read-only. Generic `run_command` deliberately keeps `php artisan tinker` and `php -r` blocked and directs callers to the dedicated Laravel tools instead.
 
 JSON output mode accepts a valid JSON document even when the framework prints notices before or after it.
 
@@ -251,6 +283,7 @@ npm run build
 npm run smoke
 npm run integration-smoke
 npm run laravel-tools-smoke
+npm run file-import-smoke
 npm run benchmark
 ```
 
@@ -260,8 +293,9 @@ The generic smoke suites are self-contained and do not depend on private applica
 
 - Only roots listed in the selected local project configuration are accessible.
 - Absolute target paths and `..` traversal are rejected.
-- `.env`, credentials, private keys, `.git`, `vendor`, and `node_modules` are blocked from normal file tools.
-- Existing-file changes require the SHA-256 value returned by a read tool.
+- File imports accept sources only from configured upload roots, reject source and destination symlinks, and stream bytes without Base64 conversion.
+- `.env`, credentials, private keys, `.git`, `vendor`, and `node_modules` are blocked from normal file tools and imports.
+- Existing-file changes require the SHA-256 value returned by a read tool; binary imports support the same check when overwriting.
 - Patch, replace, rename, and delete operations create local backups.
 - Batch patching validates every target before writing and attempts rollback after partial failure.
 - Arbitrary executables, shell operators, deployments, production flags, destructive database operations, and destructive Git commands are blocked or require explicit risk-specific confirmation.

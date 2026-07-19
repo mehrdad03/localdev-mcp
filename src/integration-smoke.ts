@@ -30,7 +30,7 @@ const transport = new StdioClientTransport({
 
 const client = new Client({
   name: "localdev-mcp-integration-smoke",
-  version: "0.5.0",
+  version: "0.6.0",
 });
 
 type TextContentItem = {
